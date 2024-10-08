@@ -1,35 +1,28 @@
-from fastapi import FastAPI, Request, Depends, status, HTTPException, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.concurrency import run_in_threadpool
-
-
-from starlette.responses import StreamingResponse, Response
-from pydantic import BaseModel, ConfigDict
-from typing import List, Union, Generator, Iterator
-
-
-from utils.pipelines.auth import bearer_security, get_current_user
-from utils.pipelines.main import get_last_user_message, stream_message_template
-from utils.pipelines.misc import convert_to_raw_url
-
+import importlib.util
+import inspect
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import time
+import uuid
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
-from schemas import FilterForm, OpenAIChatCompletionForm
+from typing import AsyncGenerator, Generator, Iterator
 from urllib.parse import urlparse
 
-import shutil
 import aiohttp
-import os
-import importlib.util
-import logging
-import time
-import json
-import uuid
-import sys
-import subprocess
-
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 from config import API_KEY, PIPELINES_DIR
+from schemas import FilterForm, OpenAIChatCompletionForm
+from utils.pipelines.auth import get_current_user
+from utils.pipelines.main import get_last_user_message, stream_message_template
+from utils.pipelines.misc import convert_to_raw_url
 
 if not os.path.exists(PIPELINES_DIR):
     os.makedirs(PIPELINES_DIR)
@@ -106,28 +99,31 @@ def get_all_pipelines():
 
     return pipelines
 
+
 def parse_frontmatter(content):
     frontmatter = {}
-    for line in content.split('\n'):
-        if ':' in line:
-            key, value = line.split(':', 1)
+    for line in content.split("\n"):
+        if ":" in line:
+            key, value = line.split(":", 1)
             frontmatter[key.strip().lower()] = value.strip()
     return frontmatter
 
+
 def install_frontmatter_requirements(requirements):
     if requirements:
-        req_list = [req.strip() for req in requirements.split(',')]
+        req_list = [req.strip() for req in requirements.split(",")]
         for req in req_list:
             print(f"Installing requirement: {req}")
             subprocess.check_call([sys.executable, "-m", "pip", "install", req])
     else:
         print("No requirements found in frontmatter.")
 
+
 async def load_module_from_path(module_name, module_path):
 
     try:
         # Read the module content
-        with open(module_path, 'r') as file:
+        with open(module_path, "r") as file:
             content = file.read()
 
         # Parse frontmatter
@@ -139,8 +135,8 @@ async def load_module_from_path(module_name, module_path):
                 frontmatter = parse_frontmatter(frontmatter_content)
 
         # Install requirements if specified
-        if 'requirements' in frontmatter:
-            install_frontmatter_requirements(frontmatter['requirements'])
+        if "requirements" in frontmatter:
+            install_frontmatter_requirements(frontmatter["requirements"])
 
         # Load the module
         spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -649,6 +645,41 @@ async def filter_outlet(pipeline_id: str, form_data: FilterForm):
         )
 
 
+async def execute_pipe(pipe, params):
+    if inspect.iscoroutinefunction(pipe):
+        return await pipe(**params)
+    else:
+        return pipe(**params)
+
+
+def process_line(form_data, line):
+    if isinstance(line, BaseModel):
+        line = line.model_dump_json()
+        line = f"data: {line}"
+
+    try:
+        line = line.decode("utf-8")
+    except:
+        pass
+
+    logging.info(f"stream_content:Generator:{line}")
+
+    if line.startswith("data:"):
+        return f"{line}\n\n"
+    else:
+        line = stream_message_template(form_data.model, line)
+        return f"data: {json.dumps(line)}\n\n"
+
+
+async def get_message_content(res: str | Generator | AsyncGenerator) -> str:
+    if isinstance(res, str):
+        return res
+    if isinstance(res, Generator):
+        return "".join(map(str, res))
+    if isinstance(res, AsyncGenerator):
+        return "".join([str(stream) async for stream in res])
+
+
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def generate_openai_chat_completion(form_data: OpenAIChatCompletionForm):
@@ -664,7 +695,7 @@ async def generate_openai_chat_completion(form_data: OpenAIChatCompletionForm):
             detail=f"Pipeline {form_data.model} not found",
         )
 
-    def job():
+    async def job():
         print(form_data.model)
 
         pipeline = app.state.PIPELINES[form_data.model]
@@ -678,15 +709,22 @@ async def generate_openai_chat_completion(form_data: OpenAIChatCompletionForm):
         else:
             pipe = PIPELINE_MODULES[pipeline_id].pipe
 
+        params = {
+            "user_message": user_message,
+            "model_id": pipeline_id,
+            "messages": messages,
+            "body": form_data.model_dump(),
+        }
+
         if form_data.stream:
 
-            def stream_content():
-                res = pipe(
-                    user_message=user_message,
-                    model_id=pipeline_id,
-                    messages=messages,
-                    body=form_data.model_dump(),
-                )
+            async def stream_content():
+                try:
+                    res = await execute_pipe(pipe, params)
+                except Exception as e:
+                    print(f"Error: {e}")
+                    yield f"data: {json.dumps({'error': {'detail':str(e)}})}\n\n"
+                    return
 
                 logging.info(f"stream:true:{res}")
 
@@ -697,22 +735,11 @@ async def generate_openai_chat_completion(form_data: OpenAIChatCompletionForm):
 
                 if isinstance(res, Iterator):
                     for line in res:
-                        if isinstance(line, BaseModel):
-                            line = line.model_dump_json()
-                            line = f"data: {line}"
+                        yield process_line(form_data, line)
 
-                        try:
-                            line = line.decode("utf-8")
-                        except:
-                            pass
-
-                        logging.info(f"stream_content:Generator:{line}")
-
-                        if line.startswith("data:"):
-                            yield f"{line}\n\n"
-                        else:
-                            line = stream_message_template(form_data.model, line)
-                            yield f"data: {json.dumps(line)}\n\n"
+                if isinstance(res, AsyncGenerator):
+                    async for line in res:
+                        yield process_line(form_data, line)
 
                 if isinstance(res, str) or isinstance(res, Generator):
                     finish_message = {
@@ -731,50 +758,42 @@ async def generate_openai_chat_completion(form_data: OpenAIChatCompletionForm):
                     }
 
                     yield f"data: {json.dumps(finish_message)}\n\n"
-                    yield f"data: [DONE]"
+                    yield "data: [DONE]"
 
             return StreamingResponse(stream_content(), media_type="text/event-stream")
         else:
-            res = pipe(
-                user_message=user_message,
-                model_id=pipeline_id,
-                messages=messages,
-                body=form_data.model_dump(),
-            )
+            try:
+                res = await execute_pipe(pipe, params)
+            except Exception as e:
+                print(f"Error: {e}")
+                return {"error": {"detail": str(e)}}
+
             logging.info(f"stream:false:{res}")
 
             if isinstance(res, dict):
                 return res
             elif isinstance(res, BaseModel):
                 return res.model_dump()
-            else:
 
-                message = ""
+            message = await get_message_content(res)
 
-                if isinstance(res, str):
-                    message = res
+            logging.info(f"stream:false:{message}")
+            return {
+                "id": f"{form_data.model}-{str(uuid.uuid4())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": form_data.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": message,
+                        },
+                        "logprobs": None,
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
 
-                if isinstance(res, Generator):
-                    for stream in res:
-                        message = f"{message}{stream}"
-
-                logging.info(f"stream:false:{message}")
-                return {
-                    "id": f"{form_data.model}-{str(uuid.uuid4())}",
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": form_data.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": message,
-                            },
-                            "logprobs": None,
-                            "finish_reason": "stop",
-                        }
-                    ],
-                }
-
-    return await run_in_threadpool(job)
+    return await job()
