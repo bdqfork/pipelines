@@ -7,6 +7,7 @@ ARG USE_CUDA_VER
 ## Basis ##
 ENV ENV=prod \
     PORT=9099 \
+    PYTHONUSERBASE=/app/pipelines/lib/ \
     # pass build args to the build
     USE_CUDA_DOCKER=${USE_CUDA} \
     USE_CUDA_DOCKER_VER=${USE_CUDA_VER}
@@ -14,7 +15,7 @@ ENV ENV=prod \
 
 # Install GCC and build tools
 RUN apt-get update && \
-    apt-get install -y gcc build-essential curl git && \
+    apt-get install -y vim gcc build-essential curl git && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

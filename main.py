@@ -114,7 +114,9 @@ def install_frontmatter_requirements(requirements):
         req_list = [req.strip() for req in requirements.split(",")]
         for req in req_list:
             print(f"Installing requirement: {req}")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", req])
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--user", req]
+            )
     else:
         print("No requirements found in frontmatter.")
 
