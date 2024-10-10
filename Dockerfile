@@ -7,7 +7,6 @@ ARG USE_CUDA_VER
 ## Basis ##
 ENV ENV=prod \
     PORT=9099 \
-    PYTHONUSERBASE=/app/pipelines/lib/ \
     # pass build args to the build
     USE_CUDA_DOCKER=${USE_CUDA} \
     USE_CUDA_DOCKER_VER=${USE_CUDA_VER}
@@ -20,6 +19,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+ENV PYTHONUSERBASE=/app/pipelines/lib
 
 # Install Python dependencies
 COPY ./requirements.txt .
