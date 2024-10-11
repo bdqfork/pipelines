@@ -20,7 +20,8 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-ENV PYTHONUSERBASE=/app/pipelines/lib
+ENV PYTHONUSERBASE=/app/pipelines/lib \
+    PATH="/app/pipelines/lib/bin:${PATH}"
 
 # Install Python dependencies
 COPY ./requirements.txt .

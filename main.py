@@ -24,6 +24,8 @@ from utils.pipelines.auth import get_current_user
 from utils.pipelines.main import get_last_user_message, stream_message_template
 from utils.pipelines.misc import convert_to_raw_url
 
+logging.basicConfig(level=logging.INFO)
+
 if not os.path.exists(PIPELINES_DIR):
     os.makedirs(PIPELINES_DIR)
 
